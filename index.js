@@ -3,21 +3,22 @@ const express = require('express');
 const stream = require('stream');
 const multer = require('multer');
 const fs = require('fs');
+const axios = require('axios');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
 // Path to your service account key file
-const KEYFILEPATH = 'key.json';
+const GCLOUD_KEYFILEPATH = 'key.json'; // gCloud credentials
 const DRIVE_ID = "0AO9Ycf7pIQxoUk9PVA"; // NeckoLogs
+const BUGZILLA_API_KEY = ""; // put your bot's key here
 
 // Read credentials from the key file
-const credentials = JSON.parse(fs.readFileSync(KEYFILEPATH, 'utf8'));
+const credentials = JSON.parse(fs.readFileSync(GCLOUD_KEYFILEPATH, 'utf8'));
 
 // todo:
 // * read in driveId from Env
-// * send to bugzilla
-// * get on github
+// * sometimes a deleted folder (not fully deleted) is found and used as drop location
 
 // Initialize the auth client
 const auth = new google.auth.GoogleAuth({
@@ -76,6 +77,26 @@ async function createFolder(name) {
   return folder.data.id;
 }
 
+async function createBugzillaComment(bugId) {
+  const url = `https://bugzilla.mozilla.org/rest/bug/${bugId}/comment`;
+  const data = {
+    "comment": "IAmAnAutomatedComment",
+  };
+  const headers = {
+    'X-BUGZILLA-API-KEY': BUGZILLA_API_KEY
+  };
+
+  axios.post(url, data, {
+    headers: headers
+  })
+  .then(response => {
+    console.log('Response:', response.data);
+  })
+  .catch(error => {
+    console.error('Error:', error);
+  });
+}
+
 async function createFile(filename, folder) {
     const fileMetadata = {
         name: filename,
@@ -97,26 +118,50 @@ app.get('/', (req, res) => {
     res.sendFile(__dirname + '/upload.html');
 });
 
+async function checkBugIdExists(bugId) {
+  const url = `https://bugzilla.mozilla.org/rest/bug/${bugId}`;
+  const headers = {
+    'X-BUGZILLA-API-KEY': BUGZILLA_API_KEY
+  };
+
+  try {
+    await axios.get(url, { headers })
+  }
+  catch {
+    return { error: true, message: "Bug number does not appear to exist" }
+  }
+  return { error: false }
+}
+
 // Endpoint to handle file uploads
 app.post('/upload', upload.single('file'), async (req, res) => {
   if (req.file) {
       try {
+        // check that bugzilla bug exists
+        let maybeError = await checkBugIdExists(req.body.bugid);
+        if (maybeError.error) {
+          let errString = 'Failed to upload file: '.concat(maybeError.message);
+          console.log(errString);
+          res.send(errString);
+          return;
+        }
+
+        // create the gDrive folder (if needed) for our bug
         console.log(`creating folder ${req.body.bugid}`);
         let folder = await createFolder(`${req.body.bugid}`);
         console.log("Folder: " + folder);
         const bufferStream = new stream.PassThrough();
         bufferStream.end(Buffer.from(req.file.buffer));
 
+        // upload the file to the new folder
         let media = {
             mimeType: req.file.mimetype,
             body: bufferStream
         }
-
         const fileMetadata = {
             name: req.file.originalname,
             parents: [folder]
         };
-        
         const file = await drive.files.create({
           supportsTeamDrives: true,
             driveId: DRIVE_ID, // Replace with your shared drive ID
@@ -126,6 +171,9 @@ app.post('/upload', upload.single('file'), async (req, res) => {
         });
         console.log('Uploaded File ID: ', file.data.id);
         res.send(`File uploaded as ${file.data.id}`);
+
+        // update bugzilla with comment
+        createBugzillaComment(req.body.bugid);
       } catch (error) {
         console.error('Error uploading file:', error);
         res.status(500).send('Error uploading file');
