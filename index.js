@@ -9,18 +9,28 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 // Path to your service account key file
 const GCLOUD_KEYFILEPATH = 'key.json'; // gCloud credentials
-const DRIVE_ID = "0AO9Ycf7pIQxoUk9PVA"; // NeckoLogs
-const BUGZILLA_API_KEY = ""; // put your bot's key here
+const DRIVE_ID = process.env.MOZ_LOGUP_DRIVE_ID; // put your team's gDrive ID in this system env variable
+const BUGZILLA_API_KEY = process.env.MOZ_LOGUP_BUGZILLA_API_KEY; // put your bot's API key in this system env variable
 
 // Read credentials from the key file
+// no-file and empty file errors will fail here
 const credentials = JSON.parse(fs.readFileSync(GCLOUD_KEYFILEPATH, 'utf8'));
 
+// very basic checks for valid config (empty env var detection)
+if (!DRIVE_ID) {
+  console.log("Config failure: No drive id for file submission");
+  return;
+}
+if (!BUGZILLA_API_KEY) {
+  console.log("Config failure: No bugzilla API key for notification");
+  return;
+}
+
 // todo:
-// * read in driveId and bugzilla API key from Env
 // * check big upload, watch memory
 // * security review and associated fixes
 // * SRE setup
-// * sometimes a deleted folder (not fully deleted) is found and used as drop location
+// * (nice to have) sometimes a deleted folder (not fully deleted) is found and used as drop location
 
 // Initialize the auth client
 const auth = new google.auth.GoogleAuth({
