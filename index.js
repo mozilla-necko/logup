@@ -3,7 +3,6 @@ const express = require('express');
 const stream = require('stream');
 const multer = require('multer');
 const fs = require('fs');
-const axios = require('axios');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -17,7 +16,10 @@ const BUGZILLA_API_KEY = ""; // put your bot's key here
 const credentials = JSON.parse(fs.readFileSync(GCLOUD_KEYFILEPATH, 'utf8'));
 
 // todo:
-// * read in driveId from Env
+// * read in driveId and bugzilla API key from Env
+// * check big upload, watch memory
+// * security review and associated fixes
+// * SRE setup
 // * sometimes a deleted folder (not fully deleted) is found and used as drop location
 
 // Initialize the auth client
@@ -29,7 +31,7 @@ const auth = new google.auth.GoogleAuth({
 });
 const drive = google.drive({ version: 'v3', auth });
 
-// returns the id of the folder if it exists
+// returns the id of the folder if it exists on the team's gDrive
 async function getFolderId(name) {
   const response = await drive.files.list({
       //pageSize: 10, // Number of files to list
@@ -55,14 +57,16 @@ async function getFolderId(name) {
   return "";
 }
 
+// creates a folder on the team's gDrive
 async function createFolder(name) {
   // no need to create folder if it already exists
   let folderId = await getFolderId(name);
   if (folderId != "") {
-    console.log("Folder already exist");
+    console.log(`Folder already exists: ${name}`);
     return folderId; 
   }
   
+  console.log(`Creating folder: ${name}`);
   const folderMetadata = {
       name: name,
       mimeType: 'application/vnd.google-apps.folder',
@@ -77,40 +81,26 @@ async function createFolder(name) {
   return folder.data.id;
 }
 
+// creates a comment on the associated bugzilla bug
 async function createBugzillaComment(bugId) {
   const url = `https://bugzilla.mozilla.org/rest/bug/${bugId}/comment`;
   const data = {
-    "comment": "IAmAnAutomatedComment",
+    "comment": "A log has been successfully uploaded to the team's storage",
   };
   const headers = {
     'X-BUGZILLA-API-KEY': BUGZILLA_API_KEY
   };
 
-  axios.post(url, data, {
-    headers: headers
-  })
-  .then(response => {
-    console.log('Response:', response.data);
-  })
-  .catch(error => {
+  return fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(data),
+  }).then(response => {
+    return response.status == 201;
+  }).catch(error => {
     console.error('Error:', error);
+    return false;
   });
-}
-
-async function createFile(filename, folder) {
-    const fileMetadata = {
-        name: filename,
-        parents: [folder]
-    };
-    
-    const file = await drive.files.create({
-      supportsTeamDrives: true,
-        driveId: DRIVE_ID, // Replace with your shared drive ID
-        resource: fileMetadata,
-        fields: 'id'
-    });
-    
-    console.log('File ID: ', file.data.id);
 }
 
 // Serve the HTML file for uploads
@@ -123,14 +113,14 @@ async function checkBugIdExists(bugId) {
   const headers = {
     'X-BUGZILLA-API-KEY': BUGZILLA_API_KEY
   };
-
-  try {
-    await axios.get(url, { headers })
-  }
-  catch {
-    return { error: true, message: "Bug number does not appear to exist" }
-  }
-  return { error: false }
+  return fetch(url, { headers }).then(response => {
+    if (!response.ok) {
+      return { error: true, message: "Bug number does not appear to exist" }
+    }
+    return { error: false };
+  }).catch(() => {
+    return { error: true, message: "Unknown"}
+  });
 }
 
 // Endpoint to handle file uploads
@@ -147,9 +137,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
         }
 
         // create the gDrive folder (if needed) for our bug
-        console.log(`creating folder ${req.body.bugid}`);
         let folder = await createFolder(`${req.body.bugid}`);
-        console.log("Folder: " + folder);
         const bufferStream = new stream.PassThrough();
         bufferStream.end(Buffer.from(req.file.buffer));
 
@@ -162,18 +150,23 @@ app.post('/upload', upload.single('file'), async (req, res) => {
             name: req.file.originalname,
             parents: [folder]
         };
-        const file = await drive.files.create({
+        await drive.files.create({
           supportsTeamDrives: true,
             driveId: DRIVE_ID, // Replace with your shared drive ID
             resource: fileMetadata,
             fields: 'id',
             media: media
         });
-        console.log('Uploaded File ID: ', file.data.id);
-        res.send(`File uploaded as ${file.data.id}`);
+        let userFeedback = `File uploaded successfully.\n<br>`;
 
         // update bugzilla with comment
-        createBugzillaComment(req.body.bugid);
+        if (await createBugzillaComment(req.body.bugid)){
+          userFeedback = userFeedback.concat("Added comment to bugzilla");
+        } else {
+          userFeedback = userFeedback.concat("Failed to comment to bugzilla");
+        }
+        console.log(userFeedback);
+        res.send(userFeedback);
       } catch (error) {
         console.error('Error uploading file:', error);
         res.status(500).send('Error uploading file');
@@ -189,29 +182,42 @@ app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
 
-async function listFiles() {
-    try {
-        const response = await drive.files.list({
-            // pageSize: 10, // Number of files to list
-            fields: 'nextPageToken, files(id, name)',
-            driveId: DRIVE_ID, // Replace with your shared drive ID
-            includeItemsFromAllDrives: true,
-            supportsAllDrives: true,
-            corpora: 'drive' // This ensures the listing is specific to the shared drive
-        });
+// unused
+// async function createFile(filename, folder) {
+//     const fileMetadata = {
+//         name: filename,
+//         parents: [folder]
+//     };
+//     const file = await drive.files.create({
+//       supportsTeamDrives: true,
+//         driveId: DRIVE_ID, // Replace with your shared drive ID
+//         resource: fileMetadata,
+//         fields: 'id'
+//     });
+//     console.log('File ID: ', file.data.id);
+// }
+//
+// async function listFiles() {
+//     try {
+//         const response = await drive.files.list({
+//             // pageSize: 10, // Number of files to list
+//             fields: 'nextPageToken, files(id, name)',
+//             driveId: DRIVE_ID, // Replace with your shared drive ID
+//             includeItemsFromAllDrives: true,
+//             supportsAllDrives: true,
+//             corpora: 'drive' // This ensures the listing is specific to the shared drive
+//         });
 
-        const files = response.data.files;
-        if (files.length) {
-            console.log('Files:');
-            files.forEach(file => {
-                console.log(`${file.name} (${file.id})`);
-            });
-        } else {
-            console.log('No files found.');
-        }
-    } catch (error) {
-        console.error('The API returned an error: ', error);
-    }
-}
-// listFiles();
-
+//         const files = response.data.files;
+//         if (files.length) {
+//             console.log('Files:');
+//             files.forEach(file => {
+//                 console.log(`${file.name} (${file.id})`);
+//             });
+//         } else {
+//             console.log('No files found.');
+//         }
+//     } catch (error) {
+//         console.error('The API returned an error: ', error);
+//     }
+// }
