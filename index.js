@@ -5,7 +5,9 @@ const multer = require('multer');
 const fs = require('fs');
 
 const app = express();
-const upload = multer({ storage: multer.memoryStorage() });
+
+const uploadFolder = "upload_folder";
+const upload = multer({ dest: uploadFolder });
 
 // Path to your service account key file
 const GCLOUD_KEYFILEPATH = 'key.json'; // gCloud credentials
@@ -25,12 +27,6 @@ if (!BUGZILLA_API_KEY) {
   console.log("Config failure: No bugzilla API key for notification");
   return;
 }
-
-// todo:
-// * check big upload, watch memory
-// * security review and associated fixes
-// * SRE setup
-// * (nice to have) sometimes a deleted folder (not fully deleted) is found and used as drop location
 
 // Initialize the auth client
 const auth = new google.auth.GoogleAuth({
@@ -113,6 +109,15 @@ async function createBugzillaComment(bugId) {
   });
 }
 
+function deleteFile(filepath) {
+  try {
+      fs.unlinkSync(filepath);
+      console.log('File deleted successfully');
+  } catch (err) {
+      console.error('Error deleting file:', err);
+  }
+}
+
 // Serve the HTML file for uploads
 app.get('/', (req, res) => {
     res.sendFile(__dirname + '/upload.html');
@@ -136,6 +141,7 @@ async function checkBugIdExists(bugId) {
 // Endpoint to handle file uploads
 app.post('/upload', upload.single('file'), async (req, res) => {
   if (req.file) {
+      let filepath = uploadFolder + "/" + req.file.filename;
       try {
         // check that bugzilla bug exists
         let maybeError = await checkBugIdExists(req.body.bugid);
@@ -147,26 +153,29 @@ app.post('/upload', upload.single('file'), async (req, res) => {
         }
 
         // create the gDrive folder (if needed) for our bug
-        let folder = await createFolder(`${req.body.bugid}`);
-        const bufferStream = new stream.PassThrough();
-        bufferStream.end(Buffer.from(req.file.buffer));
+        let folderName = `${req.body.bugid}`;
+        let folder = await createFolder(folderName);
+
+        const readStream = fs.createReadStream(filepath);
 
         // upload the file to the new folder
         let media = {
             mimeType: req.file.mimetype,
-            body: bufferStream
+            body: readStream
         }
         const fileMetadata = {
             name: req.file.originalname,
             parents: [folder]
         };
         await drive.files.create({
-          supportsTeamDrives: true,
+            supportsTeamDrives: true,
             driveId: DRIVE_ID, // Replace with your shared drive ID
             resource: fileMetadata,
             fields: 'id',
             media: media
         });
+        deleteFile(filepath);
+
         let userFeedback = `File uploaded successfully.\n<br>`;
 
         // update bugzilla with comment
@@ -175,6 +184,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
         } else {
           userFeedback = userFeedback.concat("Failed to comment to bugzilla");
         }
+
         console.log(userFeedback);
         res.send(userFeedback);
       } catch (error) {
@@ -182,6 +192,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
         res.status(500).send('Error uploading file');
       }
   } else {
+      deleteFile(filepath);
       res.status(400).send('No file uploaded');
   }
 });
@@ -191,43 +202,3 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
-
-// unused
-// async function createFile(filename, folder) {
-//     const fileMetadata = {
-//         name: filename,
-//         parents: [folder]
-//     };
-//     const file = await drive.files.create({
-//       supportsTeamDrives: true,
-//         driveId: DRIVE_ID, // Replace with your shared drive ID
-//         resource: fileMetadata,
-//         fields: 'id'
-//     });
-//     console.log('File ID: ', file.data.id);
-// }
-//
-// async function listFiles() {
-//     try {
-//         const response = await drive.files.list({
-//             // pageSize: 10, // Number of files to list
-//             fields: 'nextPageToken, files(id, name)',
-//             driveId: DRIVE_ID, // Replace with your shared drive ID
-//             includeItemsFromAllDrives: true,
-//             supportsAllDrives: true,
-//             corpora: 'drive' // This ensures the listing is specific to the shared drive
-//         });
-
-//         const files = response.data.files;
-//         if (files.length) {
-//             console.log('Files:');
-//             files.forEach(file => {
-//                 console.log(`${file.name} (${file.id})`);
-//             });
-//         } else {
-//             console.log('No files found.');
-//         }
-//     } catch (error) {
-//         console.error('The API returned an error: ', error);
-//     }
-// }
