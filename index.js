@@ -1,12 +1,11 @@
 const { google } = require('googleapis');
 const express = require('express');
-const stream = require('stream');
 const multer = require('multer');
 const fs = require('fs');
 
 const app = express();
 
-const uploadFolder = "upload_folder";
+const uploadFolder = "tmp-uploads";
 const upload = multer({ dest: uploadFolder });
 
 // Path to your service account key file
